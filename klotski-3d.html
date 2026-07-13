@@ -1,0 +1,735 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Gabes Game</title>
+<style>
+  body {
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    font-family: sans-serif;
+    background: #14141c;
+    color: #eee;
+    padding: 16px 0 32px;
+  }
+  h2 { margin: 4px 0; }
+  a.back { color: #6cf; font-size: 13px; margin-bottom: 6px; }
+  #hint {
+    font-size: 13px;
+    color: #999;
+    margin-bottom: 8px;
+    text-align: center;
+    max-width: 480px;
+  }
+  #canvas-wrap {
+    width: 100%;
+    max-width: 640px;
+    aspect-ratio: 4 / 3.4;
+    background: #0a0a12;
+    border-radius: 8px;
+    overflow: hidden;
+    touch-action: none;
+  }
+  #scene { display: block; width: 100%; height: 100%; }
+  .controls, .solution-controls { margin-top: 12px; }
+  .btn {
+    padding: 10px 14px;
+    margin: 2px;
+    border: none;
+    background: #0ae;
+    color: white;
+    font-size: 18px;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  .btn:active { transform: translateY(2px); }
+  .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .btn.stop { background: #d33; display: none; }
+  #message {
+    margin-top: 12px;
+    font-size: 20px;
+    font-weight: bold;
+    color: #6f6;
+    min-height: 28px;
+  }
+
+  /* Modo tela cheia: o tabuleiro ocupa a maior parte da tela, controles continuam visíveis embaixo */
+  :fullscreen body,
+  body:fullscreen {
+    justify-content: flex-start;
+    padding-top: 8px;
+  }
+  :fullscreen #canvas-wrap {
+    width: 100vw;
+    max-width: none;
+    height: 78vh;
+    aspect-ratio: auto;
+    border-radius: 0;
+  }
+</style>
+</head>
+<body>
+  <a class="back" href="klotski-2d.html">&larr; versão 2D</a>
+  <h2>Gabes Game</h2>
+  <div id="hint">Arraste para girar a câmera · Scroll para zoom · Clique numa peça para selecioná-la, depois use as setas</div>
+  <div id="canvas-wrap"><canvas id="scene"></canvas></div>
+  <div class="controls">
+    <button class="btn btn-dir" data-dir="up">↑</button>
+    <button class="btn btn-dir" data-dir="down">↓</button>
+    <button class="btn btn-dir" data-dir="left">←</button>
+    <button class="btn btn-dir" data-dir="right">→</button>
+    <button class="btn" id="fullscreenBtn">⛶ Tela cheia</button>
+  </div>
+  <div class="solution-controls">
+    <button class="btn btn-action" id="solveBtn">Mostrar solução automática</button>
+    <button class="btn stop" id="stopBtn">Parar</button>
+    <button class="btn btn-action" id="resetBtn">Reiniciar</button>
+  </div>
+  <div class="solution-controls">
+    <button class="btn btn-action" id="sfxBtn">🔊 Som: ON</button>
+    <button class="btn btn-action" id="musicBtn">🎵 Música: OFF</button>
+  </div>
+  <div id="message"></div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/FontLoader.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/geometries/TextGeometry.js"></script>
+  <script>
+    // ==========================================================
+    // Lógica do tabuleiro (idêntica à versão 2D — só a parte de
+    // desenho muda, para usar Three.js em vez de <div>s em CSS).
+    // ==========================================================
+    const cols = 4, rows = 5;
+
+    const goal  = { x: 1, y: 3 };
+    const goalH = { x: 1, y: 2 };
+    const TARGET_GRID = [
+      ['.', 'Q', 'Q', '.'],
+      ['V', 'Q', 'Q', 'V'],
+      ['V', 'H', 'H', 'V'],
+      ['V', 'B', 'B', 'V'],
+      ['V', 'B', 'B', 'V'],
+    ];
+
+    function pieceType(b) {
+      if (b.id === 'B') return 'B';
+      if (b.id === 'H') return 'H';
+      if (b.w === 1 && b.h === 2) return 'V';
+      return 'Q';
+    }
+
+    function matchesTargetGrid(list) {
+      const grid = Array.from({ length: rows }, () => Array(cols).fill('.'));
+      for (const b of list) {
+        const t = pieceType(b);
+        for (let dy = 0; dy < b.h; dy++)
+          for (let dx = 0; dx < b.w; dx++)
+            grid[b.y + dy][b.x + dx] = t;
+      }
+      for (let y = 0; y < rows; y++)
+        for (let x = 0; x < cols; x++)
+          if (grid[y][x] !== TARGET_GRID[y][x]) return false;
+      return true;
+    }
+
+    const blocks = [
+      { id: 'S0', x: 0, y: 0, w: 1, h: 1, color: 'white' },
+      { id: 'S1', x: 0, y: 1, w: 1, h: 1, color: 'white' },
+      { id: 'B',  x: 1, y: 0, w: 2, h: 2, color: 'cyan'  },
+      { id: 'S2', x: 3, y: 0, w: 1, h: 1, color: 'white' },
+      { id: 'S3', x: 3, y: 1, w: 1, h: 1, color: 'white' },
+      { id: 'H',  x: 1, y: 2, w: 2, h: 1, color: 'cyan'  },
+      { id: 'V0', x: 0, y: 3, w: 1, h: 2, color: 'white' },
+      { id: 'V1', x: 1, y: 3, w: 1, h: 2, color: 'white' },
+      { id: 'V2', x: 2, y: 3, w: 1, h: 2, color: 'white' },
+      { id: 'V3', x: 3, y: 3, w: 1, h: 2, color: 'white' },
+    ];
+    const INITIAL_BLOCKS = blocks.map(b => ({ ...b }));
+
+    let selectedId = null;
+    let won = false;
+    let autoPlaying = false;
+    let autoTimeout = null;
+    const occupancy = [];
+
+    function initOccupancy() {
+      for (let y = 0; y < rows; y++) occupancy[y] = Array(cols).fill(null);
+      blocks.forEach(b => {
+        for (let dy = 0; dy < b.h; dy++)
+          for (let dx = 0; dx < b.w; dx++)
+            occupancy[b.y + dy][b.x + dx] = b.id;
+      });
+    }
+
+    function checkWin() {
+      if (won) return;
+      if (matchesTargetGrid(blocks)) {
+        won = true;
+        document.getElementById('message').textContent = 'Você venceu!';
+        onWin();
+      }
+    }
+
+    // Aplica um movimento de 1 célula no MODELO (occupancy + b.x/b.y).
+    // Não mexe em nada visual — quem chama decide se anima ou não.
+    function applyMoveModel(b, dx, dy) {
+      for (let yy = b.y; yy < b.y + b.h; yy++)
+        for (let xx = b.x; xx < b.x + b.w; xx++)
+          occupancy[yy][xx] = null;
+      let ok = true;
+      for (let yy = b.y + dy; yy < b.y + b.h + dy; yy++) {
+        for (let xx = b.x + dx; xx < b.x + b.w + dx; xx++) {
+          if (xx < 0 || xx >= cols || yy < 0 || yy >= rows || occupancy[yy][xx]) ok = false;
+        }
+      }
+      if (ok) { b.x += dx; b.y += dy; }
+      for (let yy = b.y; yy < b.y + b.h; yy++)
+        for (let xx = b.x; xx < b.x + b.w; xx++)
+          occupancy[yy][xx] = b.id;
+      return ok;
+    }
+
+    // ---- Solucionador automático (busca em largura) ----
+    function solveFromCurrent() {
+      const meta = blocks.map(b => ({ id: b.id, w: b.w, h: b.h }));
+      const startState = blocks.map(b => ({ x: b.x, y: b.y }));
+      const isGoal = state => matchesTargetGrid(
+        meta.map((m, i) => ({ id: m.id, w: m.w, h: m.h, x: state[i].x, y: state[i].y }))
+      );
+      const dirs = [[-1, 0], [1, 0], [0, -1], [0, 1]];
+
+      // Peças do mesmo tipo (as 4 casinhas 1x1, os 4 verticais 1x2) são
+      // intercambiáveis: a chave de deduplicação do BFS agrupa por tipo em
+      // vez de por peça específica, senão o espaço de busca explode.
+      const typesByIndex = meta.map(pieceType);
+      const key = state => {
+        const groups = {};
+        state.forEach((p, i) => {
+          const t = typesByIndex[i];
+          (groups[t] = groups[t] || []).push(p.x + ',' + p.y);
+        });
+        return Object.keys(groups).sort().map(t => t + ':' + groups[t].sort().join(';')).join('|');
+      };
+
+      function occupancyOf(state) {
+        const occ = Array.from({ length: rows }, () => Array(cols).fill(null));
+        meta.forEach((m, i) => {
+          const { x, y } = state[i];
+          for (let dy = 0; dy < m.h; dy++)
+            for (let dx = 0; dx < m.w; dx++)
+              occ[y + dy][x + dx] = m.id;
+        });
+        return occ;
+      }
+
+      const startKey = key(startState);
+      if (isGoal(startState)) return [];
+
+      const MAX_STATES = 300000;
+      const queue = [startState];
+      const prev = new Map();
+      prev.set(startKey, null);
+      let foundKey = null;
+
+      for (let head = 0; head < queue.length && !foundKey && prev.size < MAX_STATES; head++) {
+        const state = queue[head];
+        const sKey = key(state);
+        const occ = occupancyOf(state);
+        for (let i = 0; i < meta.length && !foundKey; i++) {
+          const { id, w, h } = meta[i];
+          const { x, y } = state[i];
+          for (const [dx, dy] of dirs) {
+            const nx = x + dx, ny = y + dy;
+            if (nx < 0 || ny < 0 || nx + w > cols || ny + h > rows) continue;
+            let ok = true;
+            for (let yy = ny; yy < ny + h && ok; yy++)
+              for (let xx = nx; xx < nx + w && ok; xx++)
+                if (occ[yy][xx] && occ[yy][xx] !== id) ok = false;
+            if (!ok) continue;
+            const newState = state.map((p, idx) => idx === i ? { x: nx, y: ny } : p);
+            const nKey = key(newState);
+            if (!prev.has(nKey)) {
+              prev.set(nKey, { fromKey: sKey, move: { id, dx, dy } });
+              queue.push(newState);
+              if (isGoal(newState)) { foundKey = nKey; break; }
+            }
+          }
+        }
+      }
+
+      if (!foundKey) return null;
+      const moves = [];
+      let curKey = foundKey;
+      while (prev.get(curKey)) {
+        const entry = prev.get(curKey);
+        moves.push(entry.move);
+        curKey = entry.fromKey;
+      }
+      moves.reverse();
+      return moves;
+    }
+
+    // ==========================================================
+    // Áudio 8-bit (Web Audio API — sintetizado, sem arquivos externos)
+    // ==========================================================
+    let audioCtx = null;
+    let sfxOn = true;
+    let musicOn = false;
+    let musicTimeout = null;
+
+    function ensureAudio() {
+      if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      if (audioCtx.state === 'suspended') audioCtx.resume();
+    }
+
+    // Efeito de "pedra tombando": um tom grave descendo + um estouro de
+    // ruído filtrado, imitando o baque de um bloco de pedra caindo de lado.
+    function playMoveSFX() {
+      if (!sfxOn || !audioCtx) return;
+      const t = audioCtx.currentTime;
+
+      const osc = audioCtx.createOscillator();
+      osc.type = 'square';
+      osc.frequency.setValueAtTime(160, t);
+      osc.frequency.exponentialRampToValueAtTime(45, t + 0.12);
+      const oscGain = audioCtx.createGain();
+      oscGain.gain.setValueAtTime(0.22, t);
+      oscGain.gain.exponentialRampToValueAtTime(0.001, t + 0.16);
+      osc.connect(oscGain).connect(audioCtx.destination);
+      osc.start(t);
+      osc.stop(t + 0.17);
+
+      const bufferSize = Math.floor(audioCtx.sampleRate * 0.15);
+      const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+      const data = buffer.getChannelData(0);
+      for (let i = 0; i < bufferSize; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / bufferSize);
+      const noise = audioCtx.createBufferSource();
+      noise.buffer = buffer;
+      const noiseFilter = audioCtx.createBiquadFilter();
+      noiseFilter.type = 'lowpass';
+      noiseFilter.frequency.value = 900;
+      const noiseGain = audioCtx.createGain();
+      noiseGain.gain.setValueAtTime(0.28, t);
+      noiseGain.gain.exponentialRampToValueAtTime(0.001, t + 0.15);
+      noise.connect(noiseFilter).connect(noiseGain).connect(audioCtx.destination);
+      noise.start(t);
+    }
+
+    // Trilha 8-bit simples: um riff curto em loop, tocado com onda quadrada
+    // (som clássico de chiptune), agendado com precisão via audioCtx.currentTime.
+    const NOTE_FREQS = { C4: 261.63, D4: 293.66, E4: 329.63, F4: 349.23, G4: 392.00, A4: 440.00, C5: 523.25 };
+    const MELODY = ['C4', 'E4', 'G4', 'C5', 'G4', 'E4', 'C4', 'G4', 'A4', 'C5', 'A4', 'G4', 'F4', 'E4', 'D4', 'C4'];
+    const NOTE_DUR = 0.16;
+
+    function playNote(freq, startTime, duration) {
+      const osc = audioCtx.createOscillator();
+      osc.type = 'square';
+      osc.frequency.value = freq;
+      const gain = audioCtx.createGain();
+      gain.gain.setValueAtTime(0.001, startTime);
+      gain.gain.linearRampToValueAtTime(0.08, startTime + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.001, startTime + duration);
+      osc.connect(gain).connect(audioCtx.destination);
+      osc.start(startTime);
+      osc.stop(startTime + duration);
+    }
+
+    function scheduleMusicLoop() {
+      if (!musicOn) return;
+      const startTime = audioCtx.currentTime + 0.05;
+      MELODY.forEach((note, i) => playNote(NOTE_FREQS[note], startTime + i * NOTE_DUR, NOTE_DUR * 0.85));
+      musicTimeout = setTimeout(scheduleMusicLoop, MELODY.length * NOTE_DUR * 1000);
+    }
+
+    // Fanfarra de vitória: arpejo ascendente terminando numa nota longa
+    // reforçada com uma oitava abaixo, estilo "level clear" 8-bit.
+    function playVictoryFanfare() {
+      ensureAudio();
+      if (!sfxOn) return;
+      const t = audioCtx.currentTime;
+      const seq = [
+        { f: 523.25, d: 0.12 }, // C5
+        { f: 659.25, d: 0.12 }, // E5
+        { f: 783.99, d: 0.12 }, // G5
+        { f: 1046.50, d: 0.45 }, // C6 (segura)
+      ];
+      let when = t;
+      seq.forEach(n => { playNote(n.f, when, n.d); when += n.d; });
+      playNote(523.25, t + 0.36, 0.45); // reforça a nota final com uma oitava abaixo
+    }
+
+    // Ao vencer: pausa o loop da música de fundo (se estiver tocando) e
+    // toca a fanfarra por cima, sem competir com o riff em loop.
+    function onWin() {
+      clearTimeout(musicTimeout);
+      playVictoryFanfare();
+    }
+
+    document.getElementById('sfxBtn').addEventListener('click', e => {
+      ensureAudio();
+      sfxOn = !sfxOn;
+      e.target.textContent = `🔊 Som: ${sfxOn ? 'ON' : 'OFF'}`;
+    });
+    document.getElementById('musicBtn').addEventListener('click', e => {
+      ensureAudio();
+      musicOn = !musicOn;
+      e.target.textContent = `🎵 Música: ${musicOn ? 'ON' : 'OFF'}`;
+      if (musicOn) scheduleMusicLoop();
+      else clearTimeout(musicTimeout);
+    });
+
+    // ==========================================================
+    // Renderização 3D com Three.js
+    // ==========================================================
+    const CELL = 1;          // tamanho de uma célula do tabuleiro em unidades 3D
+    const GAP  = 0.12;       // folga entre peças vizinhas (visual)
+    const PIECE_H = 0.8;     // altura (espessura) de cada peça
+    const TRAY_H  = 0.3;     // espessura da bandeja/tabuleiro
+
+    const COLOR_HEX = {
+      white: 0xf0f0f0,
+      cyan:  0x2299ee,
+    };
+
+    const canvasWrap = document.getElementById('canvas-wrap');
+    const canvas = document.getElementById('scene');
+
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+    renderer.setPixelRatio(window.devicePixelRatio || 1);
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x0a0a12);
+
+    const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 100);
+    camera.position.set(0, 7.5, 6.5);
+
+    const controls = new THREE.OrbitControls(camera, renderer.domElement);
+    controls.target.set(0, 0, 0);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.08;
+    controls.minDistance = 4;
+    controls.maxDistance = 14;
+    controls.maxPolarAngle = Math.PI * 0.49;
+
+    scene.add(new THREE.AmbientLight(0xffffff, 0.65));
+    const dirLight = new THREE.DirectionalLight(0xffffff, 0.9);
+    dirLight.position.set(5, 10, 6);
+    scene.add(dirLight);
+
+    // Letreiro 3D "GABES GAME" flutuando atrás do tabuleiro
+    const fontLoader = new THREE.FontLoader();
+    fontLoader.load(
+      'https://cdn.jsdelivr.net/npm/three@0.128.0/examples/fonts/helvetiker_bold.typeface.json',
+      font => {
+        const textGeo = new THREE.TextGeometry('GABES GAME', {
+          font,
+          size: 0.65,
+          height: 0.22,
+          curveSegments: 6,
+          bevelEnabled: true,
+          bevelThickness: 0.03,
+          bevelSize: 0.02,
+          bevelSegments: 2,
+        });
+        textGeo.center();
+        const textMat = new THREE.MeshStandardMaterial({
+          color: 0xffcc33,
+          emissive: 0x442b00,
+          emissiveIntensity: 0.4,
+        });
+        const textMesh = new THREE.Mesh(textGeo, textMat);
+        textMesh.position.set(0, 2.2, -3.6);
+        textMesh.rotation.x = -0.25;
+        scene.add(textMesh);
+      }
+    );
+
+    // Bandeja (tabuleiro)
+    const tray = new THREE.Mesh(
+      new THREE.BoxGeometry(cols * CELL + 0.3, TRAY_H, rows * CELL + 0.3),
+      new THREE.MeshStandardMaterial({ color: 0x123456 })
+    );
+    tray.position.y = -TRAY_H / 2;
+    scene.add(tray);
+
+    function worldPos(x, y, w, h) {
+      return {
+        px: (x + w / 2 - cols / 2) * CELL,
+        pz: (y + h / 2 - rows / 2) * CELL,
+      };
+    }
+
+    // Contornos tracejados (na verdade, linhas finas) marcando o layout final:
+    // B embaixo, H em cima de B, área dos quadrados, colunas dos verticais.
+    const GOAL_OUTLINES = [
+      { x: goal.x,  y: goal.y,  w: 2, h: 2 },
+      { x: goalH.x, y: goalH.y, w: 2, h: 1 },
+      { x: 1,       y: 0,       w: 2, h: 2 },
+      { x: 0,       y: 1,       w: 1, h: 4 },
+      { x: 3,       y: 1,       w: 1, h: 4 },
+    ];
+    GOAL_OUTLINES.forEach(o => {
+      const geo = new THREE.BoxGeometry(o.w * CELL - GAP, 0.02, o.h * CELL - GAP);
+      const edges = new THREE.LineSegments(
+        new THREE.EdgesGeometry(geo),
+        new THREE.LineBasicMaterial({ color: 0xffa500 })
+      );
+      const { px, pz } = worldPos(o.x, o.y, o.w, o.h);
+      edges.position.set(px, 0.03, pz);
+      scene.add(edges);
+    });
+
+    const meshesById = {};
+    const pieceMeshes = [];
+
+    function buildPieceMesh(b) {
+      const geo = new THREE.BoxGeometry(b.w * CELL - GAP, PIECE_H, b.h * CELL - GAP);
+      const mat = new THREE.MeshStandardMaterial({ color: COLOR_HEX[b.color] });
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.userData.id = b.id;
+
+      const edges = new THREE.LineSegments(
+        new THREE.EdgesGeometry(geo),
+        new THREE.LineBasicMaterial({ color: 0x333333 })
+      );
+      mesh.add(edges);
+      mesh.userData.edges = edges;
+
+      const { px, pz } = worldPos(b.x, b.y, b.w, b.h);
+      mesh.position.set(px, PIECE_H / 2, pz);
+
+      scene.add(mesh);
+      meshesById[b.id] = mesh;
+      pieceMeshes.push(mesh);
+    }
+
+    function buildAllMeshes() {
+      pieceMeshes.forEach(m => scene.remove(m));
+      pieceMeshes.length = 0;
+      for (const key in meshesById) delete meshesById[key];
+      blocks.forEach(buildPieceMesh);
+    }
+    buildAllMeshes();
+
+    // ---- animação (tween) de posição + "rolagem" da peça ----
+    const HOP_HEIGHT = 0.12; // quanto a peça sobe no meio do movimento
+    const tweens = [];
+
+    // A peça tomba em torno do eixo horizontal perpendicular à direção do
+    // movimento (como um dado/pedra rolando de lado), com o ângulo do tombo
+    // proporcional ao tamanho da peça naquela direção (uma casinha 1x1 rola
+    // uma volta inteira de 90°; um bloco comprido rola menos, proporcional).
+    // A rotação sobe e volta a zero dentro do próprio movimento — a peça
+    // sempre pousa "deitada" e alinhada com a célula, sem torto acumulado.
+    function startTween(mesh, toX, toZ, b, dx, dy, duration = 320) {
+      const axis = dx !== 0 ? new THREE.Vector3(0, 0, 1) : new THREE.Vector3(1, 0, 0);
+      const crossLen = dx !== 0 ? b.w : b.h;
+      const sign = dx !== 0 ? -dx : dy;
+      const peak = Math.min(Math.PI / 2, (Math.PI / 2) * (1.6 / crossLen)) * sign;
+      tweens.push({
+        mesh,
+        fromX: mesh.position.x, fromZ: mesh.position.z,
+        toX, toZ,
+        baseY: PIECE_H / 2,
+        axis, peak,
+        start: performance.now(), duration,
+      });
+    }
+    function easeInOut(t) { return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2; }
+
+    function setMeshPos(b, animate, dx, dy) {
+      const mesh = meshesById[b.id];
+      const { px, pz } = worldPos(b.x, b.y, b.w, b.h);
+      if (animate) startTween(mesh, px, pz, b, dx, dy);
+      else { mesh.position.x = px; mesh.position.z = pz; mesh.position.y = PIECE_H / 2; mesh.quaternion.identity(); }
+    }
+
+    function applyMove(b, dx, dy, animate = true) {
+      ensureAudio(); // primeiro movimento sempre parte de um clique do usuário, então já pode iniciar o áudio
+      const ok = applyMoveModel(b, dx, dy);
+      if (ok) {
+        setMeshPos(b, animate, dx, dy);
+        playMoveSFX();
+      }
+      return ok;
+    }
+
+    function highlightMesh(id, color) {
+      pieceMeshes.forEach(m => m.userData.edges.material.color.set(0x333333));
+      const mesh = meshesById[id];
+      if (mesh) mesh.userData.edges.material.color.set(color);
+    }
+
+    // ---- seleção via clique (raycaster) ----
+    const raycaster = new THREE.Raycaster();
+    const pointer = new THREE.Vector2();
+    let pointerDownPos = null;
+
+    function setPointer(evt) {
+      const rect = renderer.domElement.getBoundingClientRect();
+      const cx = evt.clientX ?? (evt.touches && evt.touches[0].clientX);
+      const cy = evt.clientY ?? (evt.touches && evt.touches[0].clientY);
+      pointer.x = ((cx - rect.left) / rect.width) * 2 - 1;
+      pointer.y = -((cy - rect.top) / rect.height) * 2 + 1;
+      return { cx, cy };
+    }
+
+    renderer.domElement.addEventListener('pointerdown', evt => {
+      pointerDownPos = setPointer(evt);
+    });
+
+    renderer.domElement.addEventListener('pointerup', evt => {
+      if (autoPlaying || !pointerDownPos) return;
+      const { cx, cy } = setPointer(evt);
+      const moved = Math.hypot(cx - pointerDownPos.cx, cy - pointerDownPos.cy);
+      pointerDownPos = null;
+      if (moved > 6) return; // foi um arraste de câmera, não um clique de seleção
+
+      raycaster.setFromCamera(pointer, camera);
+      const hits = raycaster.intersectObjects(pieceMeshes, false);
+      if (hits.length) {
+        selectedId = hits[0].object.userData.id;
+        highlightMesh(selectedId, 0xff3333);
+      } else {
+        selectedId = null;
+        highlightMesh(null, 0x333333);
+      }
+    });
+
+    // ---- controles manuais ----
+    function move(dir) {
+      if (won || !selectedId || autoPlaying) return;
+      const b = blocks.find(x => x.id === selectedId);
+      let dx = 0, dy = 0;
+      if (dir === 'up')    dy = -1;
+      if (dir === 'down')  dy =  1;
+      if (dir === 'left')  dx = -1;
+      if (dir === 'right') dx =  1;
+      applyMove(b, dx, dy, true);
+      checkWin();
+    }
+
+    function setControlsEnabled(enabled) {
+      document.querySelectorAll('.btn-dir, .btn-action').forEach(btn => btn.disabled = !enabled);
+      document.getElementById('stopBtn').style.display = enabled ? 'none' : 'inline-block';
+    }
+
+    function playSolution(moves) {
+      selectedId = null;
+      highlightMesh(null, 0x333333);
+      autoPlaying = true;
+      setControlsEnabled(false);
+      let i = 0;
+      function step() {
+        if (!autoPlaying || i >= moves.length) {
+          autoPlaying = false;
+          setControlsEnabled(true);
+          document.getElementById('message').textContent = won
+            ? 'Você venceu!'
+            : (i >= moves.length ? 'Fim da demonstração.' : 'Demonstração interrompida.');
+          return;
+        }
+        const mv = moves[i];
+        const b = blocks.find(x => x.id === mv.id);
+        highlightMesh(mv.id, 0xffa500);
+        applyMove(b, mv.dx, mv.dy, true);
+        i++;
+        document.getElementById('message').textContent = `Reproduzindo solução: passo ${i}/${moves.length}`;
+        checkWin();
+        autoTimeout = setTimeout(step, 450);
+      }
+      step();
+    }
+
+    function resetBoard() {
+      if (autoPlaying) { autoPlaying = false; clearTimeout(autoTimeout); }
+      blocks.length = 0;
+      INITIAL_BLOCKS.forEach(b => blocks.push({ ...b }));
+      won = false;
+      selectedId = null;
+      document.getElementById('message').textContent = '';
+      setControlsEnabled(true);
+      initOccupancy();
+      buildAllMeshes();
+      if (musicOn) { clearTimeout(musicTimeout); scheduleMusicLoop(); }
+    }
+
+    document.querySelectorAll('.btn-dir').forEach(btn =>
+      btn.addEventListener('click', () => move(btn.dataset.dir))
+    );
+    document.getElementById('solveBtn').addEventListener('click', () => {
+      if (autoPlaying) return;
+      const moves = solveFromCurrent();
+      if (moves === null) {
+        document.getElementById('message').textContent = 'Não encontrei uma solução a partir desta posição.';
+        return;
+      }
+      if (moves.length === 0) {
+        document.getElementById('message').textContent = 'Já está na posição vencedora!';
+        return;
+      }
+      playSolution(moves);
+    });
+    document.getElementById('stopBtn').addEventListener('click', () => {
+      autoPlaying = false;
+      clearTimeout(autoTimeout);
+    });
+    document.getElementById('resetBtn').addEventListener('click', resetBoard);
+
+    // ---- tela cheia ----
+    document.getElementById('fullscreenBtn').addEventListener('click', () => {
+      if (!document.fullscreenElement) {
+        document.documentElement.requestFullscreen().catch(() => {});
+      } else {
+        document.exitFullscreen();
+      }
+    });
+    document.addEventListener('fullscreenchange', () => {
+      document.getElementById('fullscreenBtn').textContent = document.fullscreenElement
+        ? '⛶ Sair da tela cheia'
+        : '⛶ Tela cheia';
+      // o layout muda de tamanho ao (des)ativar tela cheia — espera o
+      // navegador terminar de re-calcular antes de redimensionar o renderer.
+      requestAnimationFrame(() => requestAnimationFrame(resizeRenderer));
+    });
+
+    // ---- loop de renderização ----
+    function resizeRenderer() {
+      const w = canvasWrap.clientWidth, h = canvasWrap.clientHeight;
+      renderer.setSize(w, h, false);
+      camera.aspect = w / h;
+      camera.updateProjectionMatrix();
+    }
+    window.addEventListener('resize', resizeRenderer);
+    resizeRenderer();
+
+    function animate(now) {
+      requestAnimationFrame(animate);
+      for (let i = tweens.length - 1; i >= 0; i--) {
+        const t = tweens[i];
+        const p = Math.min(1, (now - t.start) / t.duration);
+        const e = easeInOut(p);
+        t.mesh.position.x = t.fromX + (t.toX - t.fromX) * e;
+        t.mesh.position.z = t.fromZ + (t.toZ - t.fromZ) * e;
+        const wobble = Math.sin(Math.PI * p); // 0 -> 1 -> 0 durante o movimento
+        t.mesh.position.y = t.baseY + wobble * HOP_HEIGHT;
+        t.mesh.quaternion.setFromAxisAngle(t.axis, wobble * t.peak);
+        if (p >= 1) {
+          t.mesh.position.y = t.baseY;
+          t.mesh.quaternion.identity();
+          tweens.splice(i, 1);
+        }
+      }
+      controls.update();
+      renderer.render(scene, camera);
+    }
+
+    initOccupancy();
+    requestAnimationFrame(animate);
+  </script>
+</body>
+</html>

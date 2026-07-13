@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Jogo de Blocos Deslizantes</title>
+  <style>
+    body {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      font-family: sans-serif;
+      margin: 20px 0;
+    }
+    #board {
+      position: relative;
+      width: 320px;   /* 4 colunas × 80px */
+      height: 400px;  /* 5 linhas × 80px */
+      background: #0af;
+      border: 4px solid #0af;
+    }
+    .goal {
+      position: absolute;
+      box-sizing: border-box;
+      border: 3px dashed #fff;
+      pointer-events: none;
+    }
+    .block {
+      position: absolute;
+      border: 2px solid #333;
+      box-sizing: border-box;
+      touch-action: none;
+      transition: left 0.35s ease, top 0.35s ease, border-color 0.15s ease;
+    }
+    .white { background: #eee; }
+    .cyan  { background: #0ae; }
+    .controls {
+      margin-top: 12px;
+    }
+    .btn {
+      padding: 10px 14px;
+      margin: 2px;
+      border: none;
+      background: #0ae;
+      color: white;
+      font-size: 18px;
+      border-radius: 4px;
+    }
+    .btn:active {
+      transform: translateY(2px);
+    }
+    .btn:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+    .btn.stop {
+      background: #d33;
+      display: none;
+    }
+    .solution-controls {
+      margin-top: 10px;
+    }
+    #message {
+      margin-top: 12px;
+      font-size: 20px;
+      font-weight: bold;
+      color: #0a0;
+      min-height: 28px;
+    }
+  </style>
+</head>
+<body>
+  <h2>Klotski-style: Blocos Deslizantes</h2>
+  <div id="board"></div>
+  <div class="controls">
+    <button class="btn btn-dir" data-dir="up">↑</button>
+    <button class="btn btn-dir" data-dir="down">↓</button>
+    <button class="btn btn-dir" data-dir="left">←</button>
+    <button class="btn btn-dir" data-dir="right">→</button>
+  </div>
+  <div class="solution-controls">
+    <button class="btn btn-action" id="solveBtn">Mostrar solução automática</button>
+    <button class="btn stop" id="stopBtn">Parar</button>
+    <button class="btn btn-action" id="resetBtn">Reiniciar</button>
+  </div>
+  <div id="message"></div>
+
+  <script>
+    const cellSize = 80;
+    const cols = 4, rows = 5;
+
+    // Posição final (baseada em POSICAO FINAL.png), célula a célula:
+    //   .  Q  Q  .
+    //   V  Q  Q  V
+    //   V  H  H  V
+    //   V  B  B  V
+    //   V  B  B  V
+    // O bloco grande (B) termina embaixo, o retângulo (H) fica bem em cima
+    // dele, as 4 casas 1x1 (Q) sobem e ocupam o espaço que o B deixou vago
+    // no topo, e os 4 blocos verticais (V) preenchem as colunas das pontas
+    // (duas peças empilhadas de cada lado).
+    const goal  = { x: 1, y: 3 }; // alvo do bloco grande B
+    const goalH = { x: 1, y: 2 }; // alvo do retângulo H (fica por cima de B)
+    const TARGET_GRID = [
+      ['.', 'Q', 'Q', '.'],
+      ['V', 'Q', 'Q', 'V'],
+      ['V', 'H', 'H', 'V'],
+      ['V', 'B', 'B', 'V'],
+      ['V', 'B', 'B', 'V'],
+    ];
+
+    function pieceType(b) {
+      if (b.id === 'B') return 'B';
+      if (b.id === 'H') return 'H';
+      if (b.w === 1 && b.h === 2) return 'V';
+      return 'Q';
+    }
+
+    // Compara o layout atual (lista de {x,y,w,h,id}) com o TARGET_GRID inteiro,
+    // célula a célula. As 4 peças Q são intercambiáveis entre si, assim como
+    // as 4 peças V — só o *tipo* de peça em cada célula precisa bater.
+    function matchesTargetGrid(list) {
+      const grid = Array.from({ length: rows }, () => Array(cols).fill('.'));
+      for (const b of list) {
+        const t = pieceType(b);
+        for (let dy = 0; dy < b.h; dy++)
+          for (let dx = 0; dx < b.w; dx++)
+            grid[b.y + dy][b.x + dx] = t;
+      }
+      for (let y = 0; y < rows; y++)
+        for (let x = 0; x < cols; x++)
+          if (grid[y][x] !== TARGET_GRID[y][x]) return false;
+      return true;
+    }
+
+    // Layout exato do Huarong Dao / Klotski clássico (baseado em FORMA.png):
+    // duas casas 1x1 no topo de cada lado, o bloco 2x2 no centro-topo,
+    // um bloco horizontal 2x1 na linha 2 (com um vão vazio de cada lado),
+    // e quatro blocos verticais 1x2 preenchendo as duas últimas linhas.
+    const blocks = [
+      { id: 'S0', x: 0, y: 0, w: 1, h: 1, color: 'white' },
+      { id: 'S1', x: 0, y: 1, w: 1, h: 1, color: 'white' },
+      { id: 'B',  x: 1, y: 0, w: 2, h: 2, color: 'cyan'  },
+      { id: 'S2', x: 3, y: 0, w: 1, h: 1, color: 'white' },
+      { id: 'S3', x: 3, y: 1, w: 1, h: 1, color: 'white' },
+      { id: 'H',  x: 1, y: 2, w: 2, h: 1, color: 'cyan'  },
+      { id: 'V0', x: 0, y: 3, w: 1, h: 2, color: 'white' },
+      { id: 'V1', x: 1, y: 3, w: 1, h: 2, color: 'white' },
+      { id: 'V2', x: 2, y: 3, w: 1, h: 2, color: 'white' },
+      { id: 'V3', x: 3, y: 3, w: 1, h: 2, color: 'white' },
+    ];
+
+    // Guarda o layout inicial para o botão "Reiniciar".
+    const INITIAL_BLOCKS = blocks.map(b => ({ ...b }));
+
+    let selected = null;
+    let won = false;
+    let autoPlaying = false;
+    let autoTimeout = null;
+    const board = document.getElementById('board');
+    const occupancy = [];
+
+    function initOccupancy() {
+      for (let y = 0; y < rows; y++) occupancy[y] = Array(cols).fill(null);
+      blocks.forEach(b => {
+        for (let dy = 0; dy < b.h; dy++)
+          for (let dx = 0; dx < b.w; dx++)
+            occupancy[b.y + dy][b.x + dx] = b.id;
+      });
+    }
+
+    function drawGoal() {
+      // Retângulos tracejados mostrando o layout final inteiro:
+      // B embaixo, H em cima de B, quadrados no topo-centro, verticais nas pontas.
+      const outlines = [
+        { x: goal.x,  y: goal.y,  w: 2, h: 2 }, // B
+        { x: goalH.x, y: goalH.y, w: 2, h: 1 }, // H
+        { x: 1,       y: 0,       w: 2, h: 2 }, // área dos 4 quadrados
+        { x: 0,       y: 1,       w: 1, h: 4 }, // coluna de verticais à esquerda
+        { x: 3,       y: 1,       w: 1, h: 4 }, // coluna de verticais à direita
+      ];
+      outlines.forEach(o => {
+        const el = document.createElement('div');
+        el.classList.add('goal');
+        el.style.width  = o.w * cellSize + 'px';
+        el.style.height = o.h * cellSize + 'px';
+        el.style.left   = o.x * cellSize + 'px';
+        el.style.top    = o.y * cellSize + 'px';
+        board.appendChild(el);
+      });
+    }
+
+    function drawBlocks() {
+      board.innerHTML = '';
+      drawGoal();
+      blocks.forEach(b => {
+        const el = document.createElement('div');
+        el.classList.add('block', b.color);
+        el.style.width  = b.w * cellSize + 'px';
+        el.style.height = b.h * cellSize + 'px';
+        el.style.left   = b.x * cellSize + 'px';
+        el.style.top    = b.y * cellSize + 'px';
+        el.dataset.id   = b.id;
+        el.addEventListener('click', e => {
+          e.stopPropagation();
+          if (autoPlaying) return;
+          if (selected) selected.style.borderColor = '#333';
+          selected = el;
+          el.style.borderColor = 'red';
+        });
+        board.appendChild(el);
+      });
+    }
+
+    function checkWin() {
+      if (matchesTargetGrid(blocks)) {
+        won = true;
+        document.getElementById('message').textContent = 'Você venceu!';
+      }
+    }
+
+    // Tenta mover o bloco b por (dx, dy); atualiza occupancy e o DOM se possível.
+    // Retorna true se o movimento foi aplicado.
+    function applyMove(b, dx, dy) {
+      for (let yy = b.y; yy < b.y + b.h; yy++)
+        for (let xx = b.x; xx < b.x + b.w; xx++)
+          occupancy[yy][xx] = null;
+      let ok = true;
+      for (let yy = b.y + dy; yy < b.y + b.h + dy; yy++) {
+        for (let xx = b.x + dx; xx < b.x + b.w + dx; xx++) {
+          if (xx < 0 || xx >= cols || yy < 0 || yy >= rows || occupancy[yy][xx]) ok = false;
+        }
+      }
+      if (ok) {
+        b.x += dx; b.y += dy;
+        const el = board.querySelector(`[data-id="${b.id}"]`);
+        if (el) {
+          el.style.left = b.x * cellSize + 'px';
+          el.style.top  = b.y * cellSize + 'px';
+        }
+      }
+      for (let yy = b.y; yy < b.y + b.h; yy++)
+        for (let xx = b.x; xx < b.x + b.w; xx++)
+          occupancy[yy][xx] = b.id;
+      return ok;
+    }
+
+    function move(dir) {
+      if (won || !selected || autoPlaying) return;
+      const id = selected.dataset.id;
+      const b  = blocks.find(x => x.id === id);
+      let dx = 0, dy = 0;
+      if (dir === 'up')    dy = -1;
+      if (dir === 'down')  dy =  1;
+      if (dir === 'left')  dx = -1;
+      if (dir === 'right') dx =  1;
+      applyMove(b, dx, dy);
+      checkWin();
+    }
+
+    // ---- Solucionador automático (busca em largura) ----
+    // Encontra a sequência de movimentos de 1 célula que leva o bloco 'B'
+    // até a posição de vitória, a partir da posição ATUAL do tabuleiro.
+    function solveFromCurrent() {
+      const meta = blocks.map(b => ({ id: b.id, w: b.w, h: b.h }));
+      const startState = blocks.map(b => ({ x: b.x, y: b.y }));
+      const isGoal = state => matchesTargetGrid(
+        meta.map((m, i) => ({ id: m.id, w: m.w, h: m.h, x: state[i].x, y: state[i].y }))
+      );
+      const dirs = [[-1, 0], [1, 0], [0, -1], [0, 1]];
+
+      // As 4 casinhas 1x1 (Q) são idênticas entre si, e os 4 blocos verticais (V)
+      // também — não importa QUAL delas está em cada vaga, só o formato importa.
+      // Por isso a chave de deduplicação do BFS agrupa por tipo (com posições
+      // ordenadas), em vez de usar a posição de cada peça específica. Sem isso,
+      // o mesmo "desenho" do tabuleiro conta como muitos estados diferentes
+      // (uma permutação para cada jeito das peças iguais terem trocado de lugar
+      // pelo caminho), e a busca explode de memória.
+      const typesByIndex = meta.map(pieceType);
+      const key = state => {
+        const groups = {};
+        state.forEach((p, i) => {
+          const t = typesByIndex[i];
+          (groups[t] = groups[t] || []).push(p.x + ',' + p.y);
+        });
+        return Object.keys(groups).sort().map(t => t + ':' + groups[t].sort().join(';')).join('|');
+      };
+
+      function occupancyOf(state) {
+        const occ = Array.from({ length: rows }, () => Array(cols).fill(null));
+        meta.forEach((m, i) => {
+          const { x, y } = state[i];
+          for (let dy = 0; dy < m.h; dy++)
+            for (let dx = 0; dx < m.w; dx++)
+              occ[y + dy][x + dx] = m.id;
+        });
+        return occ;
+      }
+
+      const startKey = key(startState);
+      if (isGoal(startState)) return [];
+
+      const MAX_STATES = 300000; // trava de segurança para nunca estourar memória
+      const queue = [startState];
+      const prev = new Map();
+      prev.set(startKey, null);
+      let foundKey = null;
+
+      for (let head = 0; head < queue.length && !foundKey && prev.size < MAX_STATES; head++) {
+        const state = queue[head];
+        const sKey = key(state);
+        const occ = occupancyOf(state);
+        for (let i = 0; i < meta.length && !foundKey; i++) {
+          const { id, w, h } = meta[i];
+          const { x, y } = state[i];
+          for (const [dx, dy] of dirs) {
+            const nx = x + dx, ny = y + dy;
+            if (nx < 0 || ny < 0 || nx + w > cols || ny + h > rows) continue;
+            let ok = true;
+            for (let yy = ny; yy < ny + h && ok; yy++)
+              for (let xx = nx; xx < nx + w && ok; xx++)
+                if (occ[yy][xx] && occ[yy][xx] !== id) ok = false;
+            if (!ok) continue;
+            const newState = state.map((p, idx) => idx === i ? { x: nx, y: ny } : p);
+            const nKey = key(newState);
+            if (!prev.has(nKey)) {
+              prev.set(nKey, { fromKey: sKey, move: { id, dx, dy } });
+              queue.push(newState);
+              if (isGoal(newState)) { foundKey = nKey; break; }
+            }
+          }
+        }
+      }
+
+      if (!foundKey) return null;
+      const moves = [];
+      let curKey = foundKey;
+      while (prev.get(curKey)) {
+        const entry = prev.get(curKey);
+        moves.push(entry.move);
+        curKey = entry.fromKey;
+      }
+      moves.reverse();
+      return moves;
+    }
+
+    function setControlsEnabled(enabled) {
+      document.querySelectorAll('.btn-dir, .btn-action').forEach(btn => btn.disabled = !enabled);
+      document.getElementById('stopBtn').style.display = enabled ? 'none' : 'inline-block';
+    }
+
+    function highlightBlockId(id) {
+      board.querySelectorAll('.block').forEach(el => el.style.borderColor = '#333');
+      const el = board.querySelector(`[data-id="${id}"]`);
+      if (el) el.style.borderColor = 'orange';
+    }
+
+    function playSolution(moves) {
+      if (selected) { selected.style.borderColor = '#333'; selected = null; }
+      autoPlaying = true;
+      setControlsEnabled(false);
+      let i = 0;
+      function step() {
+        if (!autoPlaying || i >= moves.length) {
+          autoPlaying = false;
+          setControlsEnabled(true);
+          document.getElementById('message').textContent = won
+            ? 'Você venceu!'
+            : (i >= moves.length ? 'Fim da demonstração.' : 'Demonstração interrompida.');
+          return;
+        }
+        const mv = moves[i];
+        const b = blocks.find(x => x.id === mv.id);
+        highlightBlockId(mv.id);
+        applyMove(b, mv.dx, mv.dy);
+        i++;
+        document.getElementById('message').textContent = `Reproduzindo solução: passo ${i}/${moves.length}`;
+        checkWin();
+        autoTimeout = setTimeout(step, 450);
+      }
+      step();
+    }
+
+    function resetBoard() {
+      if (autoPlaying) {
+        autoPlaying = false;
+        clearTimeout(autoTimeout);
+      }
+      blocks.length = 0;
+      INITIAL_BLOCKS.forEach(b => blocks.push({ ...b }));
+      won = false;
+      selected = null;
+      document.getElementById('message').textContent = '';
+      setControlsEnabled(true);
+      initOccupancy();
+      drawBlocks();
+    }
+
+    document.querySelectorAll('.btn-dir').forEach(btn =>
+      btn.addEventListener('click', () => move(btn.dataset.dir))
+    );
+    document.getElementById('solveBtn').addEventListener('click', () => {
+      if (autoPlaying) return;
+      const moves = solveFromCurrent();
+      if (moves === null) {
+        document.getElementById('message').textContent = 'Não encontrei uma solução a partir desta posição.';
+        return;
+      }
+      if (moves.length === 0) {
+        document.getElementById('message').textContent = 'Já está na posição vencedora!';
+        return;
+      }
+      playSolution(moves);
+    });
+    document.getElementById('stopBtn').addEventListener('click', () => {
+      autoPlaying = false;
+      clearTimeout(autoTimeout);
+    });
+    document.getElementById('resetBtn').addEventListener('click', resetBoard);
+    board.addEventListener('click', () => {
+      if (selected) {
+        selected.style.borderColor = '#333';
+        selected = null;
+      }
+    });
+
+    initOccupancy();
+    drawBlocks();
+  </script>
+</body>
+</html>
