@@ -27,6 +27,7 @@
     max-width: 480px;
   }
   #canvas-wrap {
+    position: relative;
     flex: 1 1 auto;
     min-height: 0; /* essencial pra um filho flex conseguir encolher dentro da coluna */
     width: min(96vw, 1100px);
@@ -36,6 +37,60 @@
     touch-action: none;
   }
   #scene { display: block; width: 100%; height: 100%; }
+  /* Gabarito: mini-mapa sempre visível da posição final correta */
+  #answerKey {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    background: rgba(10, 10, 18, 0.78);
+    border: 1px solid #333;
+    border-radius: 6px;
+    padding: 5px;
+    z-index: 5;
+    pointer-events: none;
+  }
+  #answerKey .answerKey-title {
+    font-size: 9px;
+    color: #999;
+    text-align: center;
+    margin-bottom: 3px;
+    letter-spacing: 0.5px;
+  }
+  #answerGrid {
+    display: grid;
+    grid-template-columns: repeat(4, 11px);
+    grid-template-rows: repeat(5, 11px);
+    gap: 1px;
+  }
+  .answerKey-cell { width: 11px; height: 11px; border-radius: 1px; }
+  .answerKey-cell.Q, .answerKey-cell.V { background: #f0f0f0; }
+  .answerKey-cell.H, .answerKey-cell.B { background: #2299ee; }
+  .answerKey-cell.empty { background: transparent; }
+  /* Barra de progresso da solução automática */
+  #progressTrack {
+    flex: 0 0 auto;
+    width: min(96vw, 1100px);
+    max-width: 420px;
+    height: 6px;
+    background: #1c1c28;
+    border-radius: 3px;
+    overflow: hidden;
+    margin-top: 4px;
+  }
+  #progressFill {
+    height: 100%;
+    width: 0%;
+    background: #ffa500;
+    transition: width 0.25s ease;
+  }
+  #movesRemaining {
+    flex: 0 0 auto;
+    font-size: 12px;
+    color: #8fd9ff;
+    margin-top: 4px;
+    min-height: 14px;
+    text-align: center;
+  }
   .controls, .solution-controls {
     flex: 0 0 auto;
     margin-top: 6px;
@@ -71,7 +126,15 @@
 </head>
 <body>
   <div id="hint">Arraste para girar a câmera · Scroll para zoom · Clique numa peça para selecioná-la, depois use as setas</div>
-  <div id="canvas-wrap"><canvas id="scene"></canvas></div>
+  <div id="canvas-wrap">
+    <canvas id="scene"></canvas>
+    <div id="answerKey">
+      <div class="answerKey-title">SOLUÇÃO</div>
+      <div id="answerGrid"></div>
+    </div>
+  </div>
+  <div id="progressTrack"><div id="progressFill"></div></div>
+  <div id="movesRemaining"></div>
   <div class="controls">
     <button class="btn btn-dir" data-dir="up">↑</button>
     <button class="btn btn-dir" data-dir="down">↓</button>
@@ -144,6 +207,17 @@
       { id: 'V3', x: 3, y: 3, w: 1, h: 2, color: 'white' },
     ];
     const INITIAL_BLOCKS = blocks.map(b => ({ ...b }));
+
+    // Gabarito sempre visível: desenha o TARGET_GRID como um mini-mapa 2D
+    // no canto do tabuleiro, pra poder consultar a resposta certa a qualquer hora.
+    const answerGridEl = document.getElementById('answerGrid');
+    TARGET_GRID.forEach(row => {
+      row.forEach(cellType => {
+        const cell = document.createElement('div');
+        cell.className = 'answerKey-cell ' + (cellType === '.' ? 'empty' : cellType);
+        answerGridEl.appendChild(cell);
+      });
+    });
 
     let selectedId = null;
     let won = false;
@@ -281,24 +355,50 @@
       if (audioCtx.state === 'suspended') audioCtx.resume();
     }
 
-    // Efeito de "pedra tombando": um tom grave descendo + um estouro de
-    // ruído filtrado, imitando o baque de um bloco de pedra caindo de lado.
-    function playMoveSFX() {
-      if (!sfxOn || !audioCtx) return;
+    // Som de movimento: varia por TAMANHO da peça (grande/média/pequena =
+    // som mais grave/pesado a mais agudo/leve) e por TIPO de movimento
+    // (rolando = baque de "pedra tombando"; arrastando = raspado sustentado).
+    function tierOf(b) {
+      const t = pieceType(b); // 'B' | 'H' | 'V' | 'Q'
+      if (t === 'B') return 'big';
+      if (t === 'Q') return 'small';
+      return 'medium'; // H, V
+    }
+
+    const SFX_TIER = {
+      small: {
+        thud:   { f0: 260, f1: 90, fRamp: 0.09, oGain: 0.18, oDecay: 0.12, nDur: 0.10, nCut: 1400, nGain: 0.20 },
+        scrape: { dur: 0.22, fStart: 2200, fEnd: 1600, q: 1.2, peak: 0.16, lfoFreq: 30, lfoDepth: 150 },
+      },
+      medium: { // mesmos números do som original (peça mais comum no tabuleiro)
+        thud:   { f0: 160, f1: 45, fRamp: 0.12, oGain: 0.22, oDecay: 0.16, nDur: 0.15, nCut: 900,  nGain: 0.28 },
+        scrape: { dur: 0.30, fStart: 1200, fEnd: 850,  q: 1.0, peak: 0.20, lfoFreq: 22, lfoDepth: 120 },
+      },
+      big: {
+        thud:   { f0: 100, f1: 30, fRamp: 0.16, oGain: 0.28, oDecay: 0.20, nDur: 0.20, nCut: 500,  nGain: 0.34 },
+        scrape: { dur: 0.42, fStart: 650,  fEnd: 420,  q: 0.8, peak: 0.26, lfoFreq: 14, lfoDepth: 90,
+                  rumbleFreq: 55, rumbleGain: 0.05 },
+      },
+    };
+
+    // "Pedra tombando": tom grave descendo + estouro de ruído filtrado
+    // (mesma estrutura de antes, agora com os números vindos de SFX_TIER).
+    function playThud(tier) {
+      const p = SFX_TIER[tier].thud;
       const t = audioCtx.currentTime;
 
       const osc = audioCtx.createOscillator();
       osc.type = 'square';
-      osc.frequency.setValueAtTime(160, t);
-      osc.frequency.exponentialRampToValueAtTime(45, t + 0.12);
+      osc.frequency.setValueAtTime(p.f0, t);
+      osc.frequency.exponentialRampToValueAtTime(p.f1, t + p.fRamp);
       const oscGain = audioCtx.createGain();
-      oscGain.gain.setValueAtTime(0.22, t);
-      oscGain.gain.exponentialRampToValueAtTime(0.001, t + 0.16);
+      oscGain.gain.setValueAtTime(p.oGain, t);
+      oscGain.gain.exponentialRampToValueAtTime(0.001, t + p.oDecay);
       osc.connect(oscGain).connect(audioCtx.destination);
       osc.start(t);
-      osc.stop(t + 0.17);
+      osc.stop(t + p.oDecay + 0.01);
 
-      const bufferSize = Math.floor(audioCtx.sampleRate * 0.15);
+      const bufferSize = Math.floor(audioCtx.sampleRate * p.nDur);
       const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
       const data = buffer.getChannelData(0);
       for (let i = 0; i < bufferSize; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / bufferSize);
@@ -306,12 +406,67 @@
       noise.buffer = buffer;
       const noiseFilter = audioCtx.createBiquadFilter();
       noiseFilter.type = 'lowpass';
-      noiseFilter.frequency.value = 900;
+      noiseFilter.frequency.value = p.nCut;
       const noiseGain = audioCtx.createGain();
-      noiseGain.gain.setValueAtTime(0.28, t);
-      noiseGain.gain.exponentialRampToValueAtTime(0.001, t + 0.15);
+      noiseGain.gain.setValueAtTime(p.nGain, t);
+      noiseGain.gain.exponentialRampToValueAtTime(0.001, t + p.nDur);
       noise.connect(noiseFilter).connect(noiseGain).connect(audioCtx.destination);
       noise.start(t);
+    }
+
+    // "Pedra arrastando/raspando": ruído filtrado sustentado com um LFO
+    // no filtro (dá textura de atrito), em vez do baque percussivo do thud.
+    // O tier "big" ganha um retumbo grave extra por baixo.
+    function playScrape(tier) {
+      const p = SFX_TIER[tier].scrape;
+      const t = audioCtx.currentTime;
+
+      const bufferSize = Math.floor(audioCtx.sampleRate * p.dur);
+      const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+      const data = buffer.getChannelData(0);
+      for (let i = 0; i < bufferSize; i++) data[i] = Math.random() * 2 - 1; // sem fade embutido; o gain cuida do envelope
+      const noise = audioCtx.createBufferSource();
+      noise.buffer = buffer;
+
+      const filter = audioCtx.createBiquadFilter();
+      filter.type = 'bandpass';
+      filter.Q.value = p.q;
+      filter.frequency.setValueAtTime(p.fStart, t);
+      filter.frequency.linearRampToValueAtTime(p.fEnd, t + p.dur);
+
+      const lfo = audioCtx.createOscillator();
+      lfo.frequency.value = p.lfoFreq;
+      const lfoGain = audioCtx.createGain();
+      lfoGain.gain.value = p.lfoDepth;
+      lfo.connect(lfoGain).connect(filter.frequency);
+
+      const gain = audioCtx.createGain();
+      gain.gain.setValueAtTime(0.0001, t);
+      gain.gain.linearRampToValueAtTime(p.peak, t + 0.03);
+      gain.gain.setValueAtTime(p.peak, t + p.dur * 0.75);
+      gain.gain.exponentialRampToValueAtTime(0.0005, t + p.dur);
+
+      noise.connect(filter).connect(gain).connect(audioCtx.destination);
+      noise.start(t); noise.stop(t + p.dur);
+      lfo.start(t); lfo.stop(t + p.dur);
+
+      if (p.rumbleFreq) {
+        const rumble = audioCtx.createOscillator();
+        rumble.type = 'sine';
+        rumble.frequency.value = p.rumbleFreq;
+        const rGain = audioCtx.createGain();
+        rGain.gain.setValueAtTime(0.0001, t);
+        rGain.gain.linearRampToValueAtTime(p.rumbleGain, t + 0.05);
+        rGain.gain.exponentialRampToValueAtTime(0.0005, t + p.dur);
+        rumble.connect(rGain).connect(audioCtx.destination);
+        rumble.start(t); rumble.stop(t + p.dur);
+      }
+    }
+
+    function playMoveSFX(b, roll) {
+      if (!sfxOn || !audioCtx) return;
+      const tier = tierOf(b);
+      if (roll) playThud(tier); else playScrape(tier);
     }
 
     // Trilha 8-bit simples: um riff curto em loop, tocado com onda quadrada
@@ -355,6 +510,30 @@
       let when = t;
       seq.forEach(n => { playNote(n.f, when, n.d); when += n.d; });
       playNote(523.25, t + 0.36, 0.45); // reforça a nota final com uma oitava abaixo
+    }
+
+    // Som de "brilhante" ao clicar no letreiro: sequência rápida de notas
+    // agudas em onda triangular (mais brilhante/vítrea que a onda quadrada
+    // usada no resto do jogo), bem mais aguda e curta que a fanfarra de
+    // vitória — pra nunca ser confundida com ela.
+    function playTitleChime() {
+      ensureAudio();
+      if (!sfxOn) return;
+      const t = audioCtx.currentTime;
+      const freqs = [1318.51, 1567.98, 1864.66, 2093.00, 2349.32]; // E6, G6, Bb6, C7, D7
+      let when = t;
+      freqs.forEach(f => {
+        const osc = audioCtx.createOscillator();
+        osc.type = 'triangle';
+        osc.frequency.value = f;
+        const gain = audioCtx.createGain();
+        gain.gain.setValueAtTime(0.0001, when);
+        gain.gain.linearRampToValueAtTime(0.10, when + 0.008);
+        gain.gain.exponentialRampToValueAtTime(0.0001, when + 0.09);
+        osc.connect(gain).connect(audioCtx.destination);
+        osc.start(when); osc.stop(when + 0.10);
+        when += 0.045;
+      });
     }
 
     // Ao vencer: pausa o loop da música de fundo (se estiver tocando) e
@@ -440,6 +619,59 @@
       }
     }
 
+    // Faz o letreiro girar (só no eixo Y) pra sempre ficar de frente pro
+    // ponto de vista da câmera, mantendo a inclinação fixa no eixo X.
+    // Girar só em Y (em vez de um "olhar pra câmera" completo) evita que o
+    // texto incline de um jeito estranho em ângulos de câmera extremos.
+    function updateTitleBillboard() {
+      if (!titleMesh) return;
+      const dx = camera.position.x - titleMesh.position.x;
+      const dz = camera.position.z - titleMesh.position.z;
+      titleMesh.rotation.y = Math.atan2(dx, dz);
+      titleMesh.rotation.x = -0.12;
+    }
+
+    // Clique no letreiro: brilho dourado + explosão de partículas + som.
+    function triggerTitleSparkle() {
+      if (!titleMesh) return;
+      pulseTitleEmissive();
+      spawnTitleSparkle();
+      playTitleChime();
+    }
+
+    function pulseTitleEmissive() {
+      emissivePulses.push({
+        material: titleMesh.material,
+        base: 0.4, peak: 2.8,
+        start: performance.now(), duration: 600,
+      });
+    }
+
+    function spawnTitleSparkle() {
+      const count = 26;
+      const positions = new Float32Array(count * 3);
+      const velocities = [];
+      for (let i = 0; i < count; i++) {
+        positions[i * 3] = titleMesh.position.x;
+        positions[i * 3 + 1] = titleMesh.position.y;
+        positions[i * 3 + 2] = titleMesh.position.z;
+        const theta = Math.random() * Math.PI * 2;
+        const phi = Math.random() * Math.PI;
+        const speed = 1.2 + Math.random() * 1.8;
+        velocities.push(new THREE.Vector3(
+          Math.sin(phi) * Math.cos(theta) * speed,
+          Math.cos(phi) * speed * 0.6 + 0.6, // tendência pra cima
+          Math.sin(phi) * Math.sin(theta) * speed,
+        ));
+      }
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+      const mat = new THREE.PointsMaterial({ color: 0xffd700, size: 0.14, transparent: true, opacity: 1, depthWrite: false });
+      const points = new THREE.Points(geo, mat);
+      scene.add(points);
+      sparkleBursts.push({ points, geo, mat, velocities, origin: titleMesh.position.clone(), start: performance.now(), duration: 750 });
+    }
+
     const fontLoader = new THREE.FontLoader();
     fontLoader.load(
       'https://cdn.jsdelivr.net/npm/three@0.128.0/examples/fonts/helvetiker_bold.typeface.json',
@@ -469,7 +701,7 @@
           emissiveIntensity: 0.4,
         });
         titleMesh = new THREE.Mesh(textGeo, textMat);
-        titleMesh.position.set(0, 1.8, -2.9);
+        titleMesh.position.set(0, 1.8, -3.3);
         titleMesh.rotation.x = -0.12;
         scene.add(titleMesh);
         fitTitleToView();
@@ -546,42 +778,62 @@
     // ---- animação (tween) de posição + "rolagem" da peça ----
     const HOP_HEIGHT = 0.12; // quanto a peça sobe no meio do movimento
     const tweens = [];
+    const sparkleBursts = [];  // explosões de partículas douradas ativas (clique no letreiro)
+    const emissivePulses = []; // pulsos de brilho do material ativos (clique no letreiro)
 
-    // A peça tomba em torno do eixo horizontal perpendicular à direção do
-    // movimento (como um dado/pedra rolando de lado), com o ângulo do tombo
-    // proporcional ao tamanho da peça naquela direção (uma casinha 1x1 rola
-    // uma volta inteira de 90°; um bloco comprido rola menos, proporcional).
-    // A rotação sobe e volta a zero dentro do próprio movimento — a peça
+    // Regra de rolagem: as casinhas 1x1 sempre rolam feito um dado (em
+    // qualquer direção, já que são "quadradas" nos dois eixos). Os blocos
+    // compridos (verticais 1x2, horizontal 2x1) só rolam quando andam no
+    // sentido do seu lado MAIOR — andando de lado (no lado menor) eles só
+    // arrastam/deslizam. O bloco grande 2x2 nunca rola, só arrasta.
+    function shouldRoll(b, dx, dy) {
+      if (b.id === 'B') return false;
+      if (b.w === 1 && b.h === 1) return true;
+      if (b.w === 1 && b.h === 2) return dy !== 0; // vertical: rola andando pra cima/baixo
+      if (b.w === 2 && b.h === 1) return dx !== 0; // horizontal: rola andando pros lados
+      return true;
+    }
+
+    // Quando "rola": a peça tomba em torno do eixo horizontal perpendicular
+    // à direção do movimento (como um dado/pedra rolando de lado), com o
+    // ângulo do tombo proporcional ao tamanho da peça naquela direção. A
+    // rotação sobe e volta a zero dentro do próprio movimento — a peça
     // sempre pousa "deitada" e alinhada com a célula, sem torto acumulado.
-    function startTween(mesh, toX, toZ, b, dx, dy, duration = 320) {
-      const axis = dx !== 0 ? new THREE.Vector3(0, 0, 1) : new THREE.Vector3(1, 0, 0);
-      const crossLen = dx !== 0 ? b.w : b.h;
-      const sign = dx !== 0 ? -dx : dy;
-      const peak = Math.min(Math.PI / 2, (Math.PI / 2) * (1.6 / crossLen)) * sign;
+    // Quando não rola: é um deslize/arrasto liso, sem giro nem salto.
+    function startTween(mesh, toX, toZ, b, dx, dy, roll, duration = 320) {
+      let axis = new THREE.Vector3(1, 0, 0);
+      let peak = 0;
+      if (roll) {
+        axis = dx !== 0 ? new THREE.Vector3(0, 0, 1) : new THREE.Vector3(1, 0, 0);
+        const crossLen = dx !== 0 ? b.w : b.h;
+        const sign = dx !== 0 ? -dx : dy;
+        peak = Math.min(Math.PI / 2, (Math.PI / 2) * (1.6 / crossLen)) * sign;
+      }
       tweens.push({
         mesh,
         fromX: mesh.position.x, fromZ: mesh.position.z,
         toX, toZ,
         baseY: PIECE_H / 2,
-        axis, peak,
+        axis, peak, roll,
         start: performance.now(), duration,
       });
     }
     function easeInOut(t) { return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2; }
 
-    function setMeshPos(b, animate, dx, dy) {
+    function setMeshPos(b, animate, dx, dy, roll) {
       const mesh = meshesById[b.id];
       const { px, pz } = worldPos(b.x, b.y, b.w, b.h);
-      if (animate) startTween(mesh, px, pz, b, dx, dy);
+      if (animate) startTween(mesh, px, pz, b, dx, dy, roll);
       else { mesh.position.x = px; mesh.position.z = pz; mesh.position.y = PIECE_H / 2; mesh.quaternion.identity(); }
     }
 
     function applyMove(b, dx, dy, animate = true) {
       ensureAudio(); // primeiro movimento sempre parte de um clique do usuário, então já pode iniciar o áudio
+      const roll = shouldRoll(b, dx, dy); // calculado 1x só, usado tanto na animação quanto no som
       const ok = applyMoveModel(b, dx, dy);
       if (ok) {
-        setMeshPos(b, animate, dx, dy);
-        playMoveSFX();
+        setMeshPos(b, animate, dx, dy, roll);
+        playMoveSFX(b, roll);
       }
       return ok;
     }
@@ -592,10 +844,13 @@
       if (mesh) mesh.userData.edges.material.color.set(color);
     }
 
-    // ---- seleção via clique (raycaster) ----
+    // ---- seleção via clique (raycaster) + arrastar peça com o mouse ----
     const raycaster = new THREE.Raycaster();
     const pointer = new THREE.Vector2();
     let pointerDownPos = null;
+    let dragCandidate = null; // { id } da peça sob o ponteiro no pointerdown, se houver
+    const CLICK_PX_THRESHOLD = 6;        // mesmo limiar de sempre pra distinguir clique de arraste de câmera
+    const PIECE_DRAG_PX_THRESHOLD = 18;  // maior que o de clique, pra não confundir clique tremido com arrasto
 
     function setPointer(evt) {
       const rect = renderer.domElement.getBoundingClientRect();
@@ -606,18 +861,86 @@
       return { cx, cy };
     }
 
+    // Mapeia um arrasto na tela pra uma direção do tabuleiro (esquerda/
+    // direita/cima/baixo), projetando as 4 direções do MUNDO pela câmera
+    // ATUAL e escolhendo a que mais se alinha com o vetor de arrasto —
+    // assim funciona certo em qualquer ângulo de câmera (a câmera pode
+    // ser girada livremente com o OrbitControls, então não dá pra usar
+    // uma tabela fixa tipo "arrastar pra cima na tela = ir pra cima").
+    const BOARD_DIRS = [
+      { dir: 'left',  v: new THREE.Vector3(-1, 0, 0) },
+      { dir: 'right', v: new THREE.Vector3( 1, 0, 0) },
+      { dir: 'up',    v: new THREE.Vector3( 0, 0, -1) },
+      { dir: 'down',  v: new THREE.Vector3( 0, 0,  1) },
+    ];
+
+    function screenDeltaToBoardDir(dxScreen, dyScreen, originWorld) {
+      const p0 = originWorld.clone().project(camera);
+      let best = null, bestScore = -Infinity;
+      for (const cand of BOARD_DIRS) {
+        const p1 = originWorld.clone().add(cand.v).project(camera);
+        const sx = p1.x - p0.x;
+        const sy = -(p1.y - p0.y); // NDC +y é pra cima; deltas de arrasto são px DOM onde +y é pra baixo
+        const len = Math.hypot(sx, sy) || 1;
+        const score = (sx * dxScreen + sy * dyScreen) / len;
+        if (score > bestScore) { bestScore = score; best = cand.dir; }
+      }
+      return best;
+    }
+
     renderer.domElement.addEventListener('pointerdown', evt => {
       pointerDownPos = setPointer(evt);
+      dragCandidate = null;
+      if (autoPlaying || won) return;
+      raycaster.setFromCamera(pointer, camera);
+      const hits = raycaster.intersectObjects(pieceMeshes, false);
+      if (hits.length) {
+        dragCandidate = { id: hits[0].object.userData.id };
+        controls.enabled = false; // suspende a câmera enquanto um arrasto de peça pode estar começando
+      }
+    });
+
+    function restoreControlsIfNeeded() {
+      if (!controls.enabled) controls.enabled = true;
+    }
+
+    renderer.domElement.addEventListener('pointercancel', () => {
+      restoreControlsIfNeeded();
+      dragCandidate = null;
+      pointerDownPos = null;
     });
 
     renderer.domElement.addEventListener('pointerup', evt => {
+      const draggedId = dragCandidate ? dragCandidate.id : null;
+      restoreControlsIfNeeded();
+      dragCandidate = null;
+
       if (autoPlaying || !pointerDownPos) return;
       const { cx, cy } = setPointer(evt);
-      const moved = Math.hypot(cx - pointerDownPos.cx, cy - pointerDownPos.cy);
+      const dxScreen = cx - pointerDownPos.cx, dyScreen = cy - pointerDownPos.cy;
+      const moved = Math.hypot(dxScreen, dyScreen);
       pointerDownPos = null;
-      if (moved > 6) return; // foi um arraste de câmera, não um clique de seleção
+
+      if (draggedId && !won && moved >= PIECE_DRAG_PX_THRESHOLD) {
+        const mesh = meshesById[draggedId];
+        const dir = screenDeltaToBoardDir(dxScreen, dyScreen, mesh.position);
+        if (dir) {
+          selectedId = draggedId;
+          highlightMesh(selectedId, 0xff3333);
+          move(dir);
+        }
+        return;
+      }
+
+      if (moved > CLICK_PX_THRESHOLD) return; // foi um arraste de câmera, não um clique de seleção
 
       raycaster.setFromCamera(pointer, camera);
+
+      if (titleMesh) {
+        const titleHits = raycaster.intersectObject(titleMesh, false);
+        if (titleHits.length) { triggerTitleSparkle(); return; } // clique no letreiro não mexe na peça selecionada
+      }
+
       const hits = raycaster.intersectObjects(pieceMeshes, false);
       if (hits.length) {
         selectedId = hits[0].object.userData.id;
@@ -639,6 +962,7 @@
       if (dir === 'right') dx =  1;
       applyMove(b, dx, dy, true);
       checkWin();
+      scheduleMovesRemainingUpdate();
     }
 
     function setControlsEnabled(enabled) {
@@ -646,11 +970,43 @@
       document.getElementById('stopBtn').style.display = enabled ? 'none' : 'inline-block';
     }
 
+    function setProgress(fraction) {
+      document.getElementById('progressFill').style.width = Math.round(fraction * 100) + '%';
+    }
+
+    // Indicador ao vivo (jogo manual): "quantos passos faltam pra resolver
+    // a partir daqui", recalculado a cada jogada. É um número que pode
+    // SUBIR se você fizer uma jogada ruim, por isso é texto simples e não
+    // uma barra de preenchimento (que sugeriria progresso sempre crescente).
+    let movesRemainingTimer = null;
+
+    function updateMovesRemaining() {
+      const el = document.getElementById('movesRemaining');
+      if (!el) return;
+      if (autoPlaying) { el.textContent = ''; return; } // a demo automática já tem sua própria barra
+      if (won) { el.textContent = 'Resolvido! 🎉'; return; }
+      const moves = solveFromCurrent();
+      if (moves === null) {
+        el.textContent = 'Sem solução conhecida a partir daqui.';
+      } else if (moves.length === 0) {
+        el.textContent = 'Já está na posição vencedora!';
+      } else {
+        el.textContent = `Melhor solução daqui: ${moves.length} passo${moves.length === 1 ? '' : 's'}`;
+      }
+    }
+
+    function scheduleMovesRemainingUpdate() {
+      clearTimeout(movesRemainingTimer);
+      movesRemainingTimer = setTimeout(updateMovesRemaining, 0);
+    }
+
     function playSolution(moves) {
       selectedId = null;
       highlightMesh(null, 0x333333);
       autoPlaying = true;
       setControlsEnabled(false);
+      setProgress(0);
+      document.getElementById('movesRemaining').textContent = '';
       let i = 0;
       function step() {
         if (!autoPlaying || i >= moves.length) {
@@ -659,6 +1015,7 @@
           document.getElementById('message').textContent = won
             ? 'Você venceu!'
             : (i >= moves.length ? 'Fim da demonstração.' : 'Demonstração interrompida.');
+          updateMovesRemaining();
           return;
         }
         const mv = moves[i];
@@ -667,6 +1024,7 @@
         applyMove(b, mv.dx, mv.dy, true);
         i++;
         document.getElementById('message').textContent = `Reproduzindo solução: passo ${i}/${moves.length}`;
+        setProgress(i / moves.length);
         checkWin();
         autoTimeout = setTimeout(step, 450);
       }
@@ -680,10 +1038,12 @@
       won = false;
       selectedId = null;
       document.getElementById('message').textContent = '';
+      setProgress(0);
       setControlsEnabled(true);
       initOccupancy();
       buildAllMeshes();
       if (musicOn) { clearTimeout(musicTimeout); scheduleMusicLoop(); }
+      updateMovesRemaining();
     }
 
     document.querySelectorAll('.btn-dir').forEach(btn =>
@@ -744,7 +1104,7 @@
         const e = easeInOut(p);
         t.mesh.position.x = t.fromX + (t.toX - t.fromX) * e;
         t.mesh.position.z = t.fromZ + (t.toZ - t.fromZ) * e;
-        const wobble = Math.sin(Math.PI * p); // 0 -> 1 -> 0 durante o movimento
+        const wobble = t.roll ? Math.sin(Math.PI * p) : 0; // 0 -> 1 -> 0 durante o movimento (só quando rola)
         t.mesh.position.y = t.baseY + wobble * HOP_HEIGHT;
         t.mesh.quaternion.setFromAxisAngle(t.axis, wobble * t.peak);
         if (p >= 1) {
@@ -753,11 +1113,60 @@
           tweens.splice(i, 1);
         }
       }
+      for (let i = emissivePulses.length - 1; i >= 0; i--) {
+        const s = emissivePulses[i];
+        const p = Math.min(1, (now - s.start) / s.duration);
+        const wave = p < 0.25 ? p / 0.25 : Math.max(0, 1 - (p - 0.25) / 0.75); // sobe rápido, desce mais devagar
+        s.material.emissiveIntensity = s.base + wave * (s.peak - s.base);
+        if (p >= 1) { s.material.emissiveIntensity = s.base; emissivePulses.splice(i, 1); }
+      }
+      for (let i = sparkleBursts.length - 1; i >= 0; i--) {
+        const s = sparkleBursts[i];
+        const p = Math.min(1, (now - s.start) / s.duration);
+        const arr = s.geo.attributes.position.array;
+        for (let k = 0; k < s.velocities.length; k++) {
+          arr[k * 3]     = s.origin.x + s.velocities[k].x * p;
+          arr[k * 3 + 1] = s.origin.y + s.velocities[k].y * p - p * p; // leve queda por "gravidade"
+          arr[k * 3 + 2] = s.origin.z + s.velocities[k].z * p;
+        }
+        s.geo.attributes.position.needsUpdate = true;
+        s.mat.opacity = 1 - p;
+        if (p >= 1) {
+          scene.remove(s.points); s.geo.dispose(); s.mat.dispose();
+          sparkleBursts.splice(i, 1);
+        }
+      }
+
+      updateTitleBillboard();
       controls.update();
       renderer.render(scene, camera);
     }
 
+    // ---- funções de apoio só pra teste automatizado ----
+    // blocks/camera/titleMesh são const/let, então não viram window.X num
+    // script clássico — essas funções existem só pra dar visibilidade a
+    // esse estado de fora (Playwright), sem afetar o jogo em si.
+    function getBlockPos(id) {
+      const b = blocks.find(x => x.id === id);
+      return b ? { x: b.x, y: b.y } : null;
+    }
+    function getTitleYaw() { return titleMesh ? titleMesh.rotation.y : null; }
+    function getTitlePosition() { return titleMesh ? titleMesh.position.toArray() : null; }
+    function debugProjectToScreen(wx, wy, wz) {
+      const v = new THREE.Vector3(wx, wy, wz).project(camera);
+      const rect = renderer.domElement.getBoundingClientRect();
+      return { x: rect.left + (v.x + 1) / 2 * rect.width, y: rect.top + (1 - v.y) / 2 * rect.height };
+    }
+    function getCanvasRect() {
+      const r = renderer.domElement.getBoundingClientRect();
+      return { left: r.left, top: r.top, width: r.width, height: r.height };
+    }
+    function getCameraPosition() { return camera.position.toArray(); }
+    function getControlsEnabled() { return controls.enabled; }
+    function getAudioState() { return audioCtx ? audioCtx.state : null; }
+
     initOccupancy();
+    updateMovesRemaining();
     requestAnimationFrame(animate);
   </script>
 </body>
